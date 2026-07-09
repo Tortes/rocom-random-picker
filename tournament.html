@@ -666,6 +666,7 @@
       </div>
     </main>
 
+    <script src="./dex-data.js"></script>
     <script>
       const STORAGE_KEY = "rocom-battle-system-state";
       const PET_COUNT = 6;
@@ -673,6 +674,7 @@
 
       const state = loadState();
       let pets = [];
+      let dexPets = [];
       let petByNo = new Map();
       let petByName = new Map();
 
@@ -693,10 +695,11 @@
         wireEvents();
         try {
           pets = await loadPets();
-          petByNo = new Map(pets.map((pet) => [pet.no, pet]));
-          petByName = createPetNameMap(pets);
+          dexPets = loadDexPets(pets);
+          petByNo = createPetNoMap(dexPets);
+          petByName = createPetNameMap(dexPets);
           normalizeState();
-          setStatus(`已加载 ${pets.length} 只候选精灵，数据自动保存在本地`);
+          setStatus(`已加载 ${pets.length} 只候选精灵，${dexPets.length} 条图鉴头像，数据自动保存在本地`);
           renderAll();
         } catch (error) {
           setStatus(`精灵数据加载失败：${error.message}`);
@@ -746,6 +749,13 @@
           throw new Error("候选池数量不足");
         }
         return parsed;
+      }
+
+      function loadDexPets(candidatePets) {
+        if (Array.isArray(window.ROCOM_FULL_DEX) && window.ROCOM_FULL_DEX.length) {
+          return window.ROCOM_FULL_DEX;
+        }
+        return candidatePets;
       }
 
       function loadState() {
@@ -1248,14 +1258,50 @@
         select.append(option);
       }
 
+      function createPetNoMap(list) {
+        const map = new Map();
+        sortedForLookup(list).forEach((pet) => {
+          if (!map.has(pet.no)) {
+            map.set(pet.no, pet);
+          }
+        });
+        return map;
+      }
+
       function createPetNameMap(list) {
         const map = new Map();
-        list.forEach((pet) => {
+        sortedForLookup(list).forEach((pet) => {
           [pet.name, pet.displayName, pet.alt].filter(Boolean).forEach((name) => {
-            map.set(name, pet);
+            if (!map.has(name)) {
+              map.set(name, pet);
+            }
           });
         });
         return map;
+      }
+
+      function sortedForLookup(list) {
+        return [...list].sort((a, b) => petLookupRank(b) - petLookupRank(a));
+      }
+
+      function petLookupRank(pet) {
+        let rank = 0;
+        if (pet.form === "原始形态") {
+          rank += 16;
+        }
+        if (pet.mainForm === "主形态") {
+          rank += 8;
+        }
+        if (String(pet.finalState || "").includes("初始")) {
+          rank += 4;
+        }
+        if (pet.stage === "一阶") {
+          rank += 2;
+        }
+        if (pet.image) {
+          rank += 1;
+        }
+        return rank;
       }
 
       function parseTeamInput(value) {

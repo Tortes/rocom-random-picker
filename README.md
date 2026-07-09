@@ -38,4 +38,5 @@ http://127.0.0.1:4173/tournament.html
 
 - `index.html`：随机抽选页。
 - `tournament.html`：对战系统页。
+- `dex-data.js`：完整图鉴头像数据，用于对战页手动输入精灵时匹配头像。
 - `excluded-lists.md`：当前随机池排除列表记录。
