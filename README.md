@@ -6,8 +6,8 @@
 
 ## 在线使用
 
-- 随机抽选页：https://tortes.github.io/rocom-random-picker/
-- 对战系统页：https://tortes.github.io/rocom-random-picker/tournament.html
+- 随机抽选页：https://tortes.github.io/RocoTournament/
+- 对战系统页：https://tortes.github.io/RocoTournament/tournament.html
 
 ## 功能
 
