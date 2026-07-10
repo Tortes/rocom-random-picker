@@ -113,6 +113,20 @@
         justify-content: flex-end;
       }
 
+      .group-count-control {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 800;
+        white-space: nowrap;
+      }
+
+      .group-count-control .number-input {
+        width: 64px;
+      }
+
       .button,
       .link-button {
         display: inline-flex;
@@ -614,6 +628,9 @@
             </svg>
             清空赛事
           </button>
+          <button class="button secondary" id="exportConfigButton" type="button">导出配置</button>
+          <button class="button secondary" id="importConfigButton" type="button">导入配置</button>
+          <input id="importConfigInput" type="file" accept="application/json,.json" hidden>
         </div>
       </header>
 
@@ -621,7 +638,7 @@
         <div class="tags">
           <span class="tag">参赛人员本地保存</span>
           <span class="tag">随机 6 只 / 手动不限</span>
-          <span class="tag">双组循环赛</span>
+          <span class="tag" id="groupCountTag">2 组循环赛</span>
           <span class="tag">半决赛 / 决赛 / 季军赛</span>
         </div>
         <div class="save-state" id="saveState">正在加载精灵数据</div>
@@ -648,7 +665,10 @@
             <div class="panel-head">
               <h2>小组赛</h2>
               <div class="inline-actions">
-                <button class="button secondary" id="createGroupsButton" type="button">划分两组</button>
+                <label class="group-count-control" for="groupCountInput">分组数
+                  <input class="number-input" id="groupCountInput" type="number" min="2" max="26" step="1" inputmode="numeric">
+                </label>
+                <button class="button secondary" id="createGroupsButton" type="button">划分小组</button>
                 <button class="button primary" id="enterKnockoutButton" type="button">进入淘汰赛</button>
               </div>
             </div>
@@ -658,7 +678,7 @@
           <section class="panel" aria-label="淘汰赛">
             <div class="panel-head">
               <h2>淘汰赛</h2>
-              <div class="help-text">每组选出前两名，A1 对 B2，B1 对 A2。</div>
+              <div class="help-text" id="knockoutHelp">每组选出前两名，A1 对 B2，B1 对 A2。</div>
             </div>
             <div class="panel-body" id="knockoutStage"></div>
           </section>
@@ -670,7 +690,8 @@
     <script>
       const STORAGE_KEY = "rocom-battle-system-state";
       const PET_COUNT = 6;
-      const GROUP_NAMES = ["A", "B"];
+      const MIN_GROUP_COUNT = 2;
+      const MAX_GROUP_COUNT = 26;
 
       const state = loadState();
       let pets = [];
@@ -688,6 +709,12 @@
       const createGroupsButton = document.querySelector("#createGroupsButton");
       const enterKnockoutButton = document.querySelector("#enterKnockoutButton");
       const resetAllButton = document.querySelector("#resetAllButton");
+      const groupCountInput = document.querySelector("#groupCountInput");
+      const groupCountTag = document.querySelector("#groupCountTag");
+      const knockoutHelp = document.querySelector("#knockoutHelp");
+      const exportConfigButton = document.querySelector("#exportConfigButton");
+      const importConfigButton = document.querySelector("#importConfigButton");
+      const importConfigInput = document.querySelector("#importConfigInput");
 
       init();
 
@@ -722,6 +749,10 @@
         });
         createGroupsButton.addEventListener("click", createGroups);
         enterKnockoutButton.addEventListener("click", enterKnockout);
+        groupCountInput.addEventListener("change", updateGroupCount);
+        exportConfigButton.addEventListener("click", exportConfig);
+        importConfigButton.addEventListener("click", () => importConfigInput.click());
+        importConfigInput.addEventListener("change", importConfig);
         resetAllButton.addEventListener("click", () => {
           if (!confirm("确认清空所有参赛人员、分组和比赛结果？")) {
             return;
@@ -765,12 +796,7 @@
             return defaultState();
           }
           const parsed = JSON.parse(raw);
-          return {
-            participants: Array.isArray(parsed.participants) ? parsed.participants : [],
-            groups: parsed.groups || null,
-            groupStats: parsed.groupStats || {},
-            bracket: parsed.bracket || null
-          };
+          return createState(parsed);
         } catch {
           return defaultState();
         }
@@ -779,9 +805,20 @@
       function defaultState() {
         return {
           participants: [],
+          groupCount: MIN_GROUP_COUNT,
           groups: null,
           groupStats: {},
           bracket: null
+        };
+      }
+
+      function createState(value) {
+        return {
+          participants: Array.isArray(value?.participants) ? value.participants : [],
+          groupCount: normalizeGroupCount(value?.groupCount),
+          groups: value?.groups || null,
+          groupStats: value?.groupStats || {},
+          bracket: value?.bracket || null
         };
       }
 
@@ -794,11 +831,15 @@
             team: normalizeTeam(participant.team)
           }));
         const ids = new Set(state.participants.map((participant) => participant.id));
+        state.groupCount = normalizeGroupCount(state.groupCount);
         if (state.groups) {
-          state.groups = {
-            A: (state.groups.A || []).filter((id) => ids.has(id)),
-            B: (state.groups.B || []).filter((id) => ids.has(id))
-          };
+          const groupNames = getGroupNames();
+          state.groups = Object.fromEntries(
+            groupNames.map((groupName) => [(groupName), (state.groups[groupName] || []).filter((id) => ids.has(id))])
+          );
+        }
+        if (state.groupCount !== 2) {
+          state.bracket = null;
         }
         Object.keys(state.groupStats || {}).forEach((id) => {
           if (!ids.has(id)) {
@@ -830,9 +871,26 @@
         renderParticipants();
         renderGroupStage();
         renderKnockout();
-        createGroupsButton.disabled = state.participants.length < 4 || pets.length < PET_COUNT;
+        groupCountInput.value = state.groupCount;
+        groupCountTag.textContent = `${state.groupCount} 组循环赛`;
+        createGroupsButton.textContent = `划分 ${state.groupCount} 组`;
+        knockoutHelp.textContent = state.groupCount === 2
+          ? "每组选出前两名，A1 对 B2，B1 对 A2。"
+          : "淘汰赛当前仅支持 2 组赛制，请将分组数改为 2。";
+        createGroupsButton.disabled = state.participants.length < state.groupCount * 2 || pets.length < PET_COUNT;
         enterKnockoutButton.disabled = !canEnterKnockout();
         rollAllButton.disabled = state.participants.length === 0 || pets.length < PET_COUNT;
+      }
+
+      function updateGroupCount() {
+        const nextGroupCount = normalizeGroupCount(groupCountInput.value);
+        groupCountInput.value = nextGroupCount;
+        if (nextGroupCount === state.groupCount) {
+          return;
+        }
+        state.groupCount = nextGroupCount;
+        resetProgressAfterParticipantChange();
+        saveAndRender();
       }
 
       function addPlayer() {
@@ -974,14 +1032,16 @@
       }
 
       function createGroups() {
-        if (state.participants.length < 4) {
-          setStatus("至少需要 4 名参赛人员");
+        const minimumParticipants = state.groupCount * 2;
+        if (state.participants.length < minimumParticipants) {
+          setStatus(`划分 ${state.groupCount} 组至少需要 ${minimumParticipants} 名参赛人员`);
           return;
         }
         const ids = shuffle(state.participants.map((participant) => participant.id));
-        state.groups = { A: [], B: [] };
+        const groupNames = getGroupNames();
+        state.groups = Object.fromEntries(groupNames.map((groupName) => [groupName, []]));
         ids.forEach((id, index) => {
-          state.groups[index % 2 === 0 ? "A" : "B"].push(id);
+          state.groups[groupNames[index % groupNames.length]].push(id);
         });
         state.groupStats = {};
         state.participants.forEach((participant) => {
@@ -995,13 +1055,13 @@
         if (!state.groups) {
           const empty = document.createElement("div");
           empty.className = "empty-state";
-          empty.textContent = "添加至少 4 名参赛人员后，点击划分两组";
+          empty.textContent = `添加至少 ${state.groupCount * 2} 名参赛人员后，点击划分 ${state.groupCount} 组`;
           groupStage.replaceChildren(empty);
           return;
         }
         const grid = document.createElement("div");
         grid.className = "group-grid";
-        GROUP_NAMES.forEach((groupName) => grid.append(renderGroup(groupName)));
+        getGroupNames().forEach((groupName) => grid.append(renderGroup(groupName)));
         groupStage.replaceChildren(grid);
       }
 
@@ -1114,12 +1174,13 @@
       }
 
       function canEnterKnockout() {
-        return Boolean(state.groups && GROUP_NAMES.every((groupName) => (state.groups[groupName] || []).length >= 2));
+        const groupNames = getGroupNames();
+        return Boolean(state.groupCount === 2 && state.groups && groupNames.every((groupName) => (state.groups[groupName] || []).length >= 2));
       }
 
       function enterKnockout() {
         if (!canEnterKnockout()) {
-          setStatus("每组至少需要 2 名玩家才能进入淘汰赛");
+          setStatus(state.groupCount === 2 ? "每组至少需要 2 名玩家才能进入淘汰赛" : "当前淘汰赛仅支持 2 组赛制");
           return;
         }
         const rankedA = rankGroup("A");
@@ -1139,7 +1200,7 @@
         if (!state.bracket) {
           const empty = document.createElement("div");
           empty.className = "empty-state";
-          empty.textContent = "小组赛结束后点击进入淘汰赛";
+          empty.textContent = state.groupCount === 2 ? "小组赛结束后点击进入淘汰赛" : "当前分组数不支持淘汰赛";
           knockoutStage.replaceChildren(empty);
           return;
         }
@@ -1392,6 +1453,62 @@
 
       function cleanName(value) {
         return String(value || "").replace(/\s+/g, " ").trim();
+      }
+
+      function normalizeGroupCount(value) {
+        const count = Number.parseInt(value, 10);
+        if (!Number.isFinite(count)) {
+          return MIN_GROUP_COUNT;
+        }
+        return Math.min(MAX_GROUP_COUNT, Math.max(MIN_GROUP_COUNT, count));
+      }
+
+      function getGroupNames() {
+        return Array.from({ length: state.groupCount }, (_, index) => String.fromCharCode(65 + index));
+      }
+
+      function exportConfig() {
+        const payload = {
+          version: 1,
+          exportedAt: new Date().toISOString(),
+          state
+        };
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = "rocom-battle-config.json";
+        link.click();
+        URL.revokeObjectURL(url);
+        setStatus("配置已导出");
+      }
+
+      function importConfig(event) {
+        const [file] = event.target.files;
+        event.target.value = "";
+        if (!file) {
+          return;
+        }
+        const reader = new FileReader();
+        reader.addEventListener("load", () => {
+          try {
+            const parsed = JSON.parse(reader.result);
+            const rawState = parsed?.state || parsed;
+            if (!rawState || typeof rawState !== "object" || !Array.isArray(rawState.participants)) {
+              throw new Error("无效配置");
+            }
+            const imported = createState(rawState);
+            Object.assign(state, imported);
+            normalizeState();
+            saveState();
+            renderAll();
+            setStatus("配置已导入并保存到本地");
+          } catch {
+            setStatus("导入失败：请选择有效的配置文件");
+          }
+        });
+        reader.addEventListener("error", () => setStatus("导入失败：无法读取配置文件"));
+        reader.readAsText(file);
       }
     </script>
   </body>
