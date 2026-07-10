@@ -293,9 +293,30 @@
 
       .player-head {
         display: grid;
-        grid-template-columns: minmax(0, 1fr) auto;
+        grid-template-columns: minmax(0, 1fr) auto auto;
         gap: 10px;
         align-items: center;
+      }
+
+      .qualification-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 800;
+        white-space: nowrap;
+      }
+
+      .qualification-toggle input {
+        width: 16px;
+        height: 16px;
+        margin: 0;
+        accent-color: var(--green);
+      }
+
+      .player-card.verified {
+        border-color: rgba(38, 120, 101, 0.42);
       }
 
       .manual-row {
@@ -648,14 +669,18 @@
         <section class="panel" aria-label="参赛人员">
           <div class="panel-head">
             <h2>参赛人员</h2>
-            <button class="button secondary small" id="rollAllButton" type="button">全部随机</button>
+            <div class="inline-actions">
+              <button class="button secondary small" id="rollAllButton" type="button">全部随机</button>
+              <button class="button secondary small" id="verifyAllButton" type="button">一键全选</button>
+              <button class="button secondary small" id="clearVerificationButton" type="button">一键全取消</button>
+            </div>
           </div>
           <div class="panel-body">
             <div class="form-row">
               <input class="field" id="newPlayerName" type="text" maxlength="24" placeholder="输入玩家名">
               <button class="button primary" id="addPlayerButton" type="button">添加</button>
             </div>
-            <div class="help-text">手动填入支持任意编号或名称，使用空格、逗号、顿号分隔。</div>
+            <div class="help-text">手动填入支持任意编号或名称，使用空格、逗号、顿号分隔。仅已验证资格的选手会进入赛程。</div>
             <div class="player-list" id="playerList"></div>
           </div>
         </section>
@@ -675,13 +700,6 @@
             <div class="panel-body" id="groupStage"></div>
           </section>
 
-          <section class="panel" aria-label="淘汰赛">
-            <div class="panel-head">
-              <h2>淘汰赛</h2>
-              <div class="help-text" id="knockoutHelp">每组选出前两名，A1 对 B2，B1 对 A2。</div>
-            </div>
-            <div class="panel-body" id="knockoutStage"></div>
-          </section>
         </div>
       </div>
     </main>
@@ -702,16 +720,16 @@
       const saveStateEl = document.querySelector("#saveState");
       const playerList = document.querySelector("#playerList");
       const groupStage = document.querySelector("#groupStage");
-      const knockoutStage = document.querySelector("#knockoutStage");
       const newPlayerName = document.querySelector("#newPlayerName");
       const addPlayerButton = document.querySelector("#addPlayerButton");
       const rollAllButton = document.querySelector("#rollAllButton");
+      const verifyAllButton = document.querySelector("#verifyAllButton");
+      const clearVerificationButton = document.querySelector("#clearVerificationButton");
       const createGroupsButton = document.querySelector("#createGroupsButton");
       const enterKnockoutButton = document.querySelector("#enterKnockoutButton");
       const resetAllButton = document.querySelector("#resetAllButton");
       const groupCountInput = document.querySelector("#groupCountInput");
       const groupCountTag = document.querySelector("#groupCountTag");
-      const knockoutHelp = document.querySelector("#knockoutHelp");
       const exportConfigButton = document.querySelector("#exportConfigButton");
       const importConfigButton = document.querySelector("#importConfigButton");
       const importConfigInput = document.querySelector("#importConfigInput");
@@ -749,6 +767,8 @@
         });
         createGroupsButton.addEventListener("click", createGroups);
         enterKnockoutButton.addEventListener("click", enterKnockout);
+        verifyAllButton.addEventListener("click", () => setAllQualifications(true));
+        clearVerificationButton.addEventListener("click", () => setAllQualifications(false));
         groupCountInput.addEventListener("change", updateGroupCount);
         exportConfigButton.addEventListener("click", exportConfig);
         importConfigButton.addEventListener("click", () => importConfigInput.click());
@@ -828,24 +848,33 @@
           .map((participant) => ({
             id: participant.id,
             name: cleanName(participant.name) || "未命名玩家",
-            team: normalizeTeam(participant.team)
+            team: normalizeTeam(participant.team),
+            eligible: Boolean(participant.eligible)
           }));
         const ids = new Set(state.participants.map((participant) => participant.id));
+        const eligibleIds = new Set(state.participants.filter((participant) => participant.eligible).map((participant) => participant.id));
         state.groupCount = normalizeGroupCount(state.groupCount);
         if (state.groups) {
           const groupNames = getGroupNames();
           state.groups = Object.fromEntries(
-            groupNames.map((groupName) => [(groupName), (state.groups[groupName] || []).filter((id) => ids.has(id))])
+            groupNames.map((groupName) => [(groupName), (state.groups[groupName] || []).filter((id) => ids.has(id) && eligibleIds.has(id))])
           );
         }
-        if (state.groupCount !== 2) {
+        if (!isPowerOfTwo(state.groupCount)) {
+          state.bracket = null;
+        } else if (state.bracket && !Array.isArray(state.bracket.rounds)) {
+          state.bracket = migrateLegacyBracket(state.bracket);
+        } else if (state.bracket && state.bracket.groupCount !== state.groupCount) {
           state.bracket = null;
         }
         Object.keys(state.groupStats || {}).forEach((id) => {
-          if (!ids.has(id)) {
+          if (!ids.has(id) || !eligibleIds.has(id)) {
             delete state.groupStats[id];
           }
         });
+        if (state.bracket && !hasQualifiedGroups()) {
+          state.bracket = null;
+        }
       }
 
       function saveState() {
@@ -870,16 +899,17 @@
       function renderAll() {
         renderParticipants();
         renderGroupStage();
-        renderKnockout();
         groupCountInput.value = state.groupCount;
         groupCountTag.textContent = `${state.groupCount} 组循环赛`;
         createGroupsButton.textContent = `划分 ${state.groupCount} 组`;
-        knockoutHelp.textContent = state.groupCount === 2
-          ? "每组选出前两名，A1 对 B2，B1 对 A2。"
-          : "淘汰赛当前仅支持 2 组赛制，请将分组数改为 2。";
-        createGroupsButton.disabled = state.participants.length < state.groupCount * 2 || pets.length < PET_COUNT;
+        createGroupsButton.disabled = getEligibleParticipants().length < state.groupCount * 2 || pets.length < PET_COUNT;
         enterKnockoutButton.disabled = !canEnterKnockout();
+        enterKnockoutButton.title = isPowerOfTwo(state.groupCount)
+          ? "每组至少需要 2 名已验证资格的选手"
+          : "分组数量必须是 2、4、8 或 16 才能进入淘汰赛";
         rollAllButton.disabled = state.participants.length === 0 || pets.length < PET_COUNT;
+        verifyAllButton.disabled = state.participants.length === 0 || state.participants.every((participant) => participant.eligible);
+        clearVerificationButton.disabled = state.participants.length === 0 || state.participants.every((participant) => !participant.eligible);
       }
 
       function updateGroupCount() {
@@ -902,7 +932,8 @@
         state.participants.push({
           id: createId(),
           name,
-          team: []
+          team: [],
+          eligible: false
         });
         newPlayerName.value = "";
         resetProgressAfterParticipantChange();
@@ -921,6 +952,17 @@
         state.bracket = null;
       }
 
+      function setAllQualifications(eligible) {
+        if (state.participants.length === 0 || state.participants.every((participant) => participant.eligible === eligible)) {
+          return;
+        }
+        state.participants.forEach((participant) => {
+          participant.eligible = eligible;
+        });
+        resetProgressAfterParticipantChange();
+        saveAndRender();
+      }
+
       function renderParticipants() {
         if (state.participants.length === 0) {
           const empty = document.createElement("div");
@@ -934,7 +976,7 @@
 
       function renderParticipantCard(participant) {
         const card = document.createElement("article");
-        card.className = "player-card";
+        card.className = participant.eligible ? "player-card verified" : "player-card";
 
         const head = document.createElement("div");
         head.className = "player-head";
@@ -947,12 +989,25 @@
           nameInput.value = participant.name;
           saveAndRender();
         });
+        const qualification = document.createElement("label");
+        qualification.className = "qualification-toggle";
+        const qualificationInput = document.createElement("input");
+        qualificationInput.type = "checkbox";
+        qualificationInput.checked = participant.eligible;
+        qualificationInput.addEventListener("change", () => {
+          participant.eligible = qualificationInput.checked;
+          resetProgressAfterParticipantChange();
+          saveAndRender();
+        });
+        const qualificationText = document.createElement("span");
+        qualificationText.textContent = "资格已验证";
+        qualification.append(qualificationInput, qualificationText);
         const remove = document.createElement("button");
         remove.className = "button danger small";
         remove.type = "button";
         remove.textContent = "移除";
         remove.addEventListener("click", () => removePlayer(participant.id));
-        head.append(nameInput, remove);
+        head.append(nameInput, qualification, remove);
 
         const roster = renderRoster(participant.team, false);
 
@@ -1033,11 +1088,12 @@
 
       function createGroups() {
         const minimumParticipants = state.groupCount * 2;
-        if (state.participants.length < minimumParticipants) {
-          setStatus(`划分 ${state.groupCount} 组至少需要 ${minimumParticipants} 名参赛人员`);
+        const eligibleParticipants = getEligibleParticipants();
+        if (eligibleParticipants.length < minimumParticipants) {
+          setStatus(`划分 ${state.groupCount} 组至少需要 ${minimumParticipants} 名已验证参赛资格的选手`);
           return;
         }
-        const ids = shuffle(state.participants.map((participant) => participant.id));
+        const ids = shuffle(eligibleParticipants.map((participant) => participant.id));
         const groupNames = getGroupNames();
         state.groups = Object.fromEntries(groupNames.map((groupName) => [groupName, []]));
         ids.forEach((id, index) => {
@@ -1055,7 +1111,7 @@
         if (!state.groups) {
           const empty = document.createElement("div");
           empty.className = "empty-state";
-          empty.textContent = `添加至少 ${state.groupCount * 2} 名参赛人员后，点击划分 ${state.groupCount} 组`;
+          empty.textContent = `验证至少 ${state.groupCount * 2} 名选手资格后，点击划分 ${state.groupCount} 组`;
           groupStage.replaceChildren(empty);
           return;
         }
@@ -1174,149 +1230,87 @@
       }
 
       function canEnterKnockout() {
-        const groupNames = getGroupNames();
-        return Boolean(state.groupCount === 2 && state.groups && groupNames.every((groupName) => (state.groups[groupName] || []).length >= 2));
+        return Boolean(isPowerOfTwo(state.groupCount) && hasQualifiedGroups());
       }
 
       function enterKnockout() {
         if (!canEnterKnockout()) {
-          setStatus(state.groupCount === 2 ? "每组至少需要 2 名玩家才能进入淘汰赛" : "当前淘汰赛仅支持 2 组赛制");
+          setStatus(isPowerOfTwo(state.groupCount)
+            ? "每组至少需要 2 名玩家才能进入淘汰赛"
+            : "分组数量必须是 2 的幂次（2、4、8 或 16）才能进入淘汰赛");
           return;
         }
-        const rankedA = rankGroup("A");
-        const rankedB = rankGroup("B");
-        state.bracket = {
-          semis: [
-            { id: "S1", label: "半决赛 1", players: [rankedA[0].player.id, rankedB[1].player.id], winnerId: "" },
-            { id: "S2", label: "半决赛 2", players: [rankedB[0].player.id, rankedA[1].player.id], winnerId: "" }
-          ],
-          final: { id: "F", label: "决赛", players: [], winnerId: "" },
+        if (!Array.isArray(state.bracket?.rounds)) {
+          state.bracket = createKnockoutBracket();
+          saveState();
+        }
+        window.location.assign("./knockout.html");
+      }
+
+      function hasQualifiedGroups() {
+        const groupNames = getGroupNames();
+        return Boolean(state.groups && groupNames.every((groupName) => (state.groups[groupName] || []).length >= 2));
+      }
+
+      function createKnockoutBracket() {
+        const firstRoundMatches = [];
+        const groupNames = getGroupNames();
+        for (let index = 0; index < groupNames.length; index += 2) {
+          const firstGroup = rankGroup(groupNames[index]);
+          const secondGroup = rankGroup(groupNames[index + 1]);
+          firstRoundMatches.push(
+            { players: [firstGroup[0].player.id, secondGroup[1].player.id], winnerId: "" },
+            { players: [secondGroup[0].player.id, firstGroup[1].player.id], winnerId: "" }
+          );
+        }
+
+        const rounds = [];
+        let matchCount = firstRoundMatches.length;
+        let matches = firstRoundMatches;
+        while (matchCount >= 1) {
+          const roundNumber = rounds.length + 1;
+          rounds.push({
+            id: `R${roundNumber}`,
+            label: knockoutRoundLabel(matchCount),
+            matches: matches.map((match, index) => ({
+              id: `R${roundNumber}M${index + 1}`,
+              label: `${knockoutRoundLabel(matchCount)} ${index + 1}`,
+              players: match.players || [],
+              winnerId: match.winnerId || ""
+            }))
+          });
+          if (matchCount === 1) {
+            break;
+          }
+          matchCount /= 2;
+          matches = Array.from({ length: matchCount }, () => ({ players: [], winnerId: "" }));
+        }
+
+        return {
+          version: 2,
+          groupCount: state.groupCount,
+          rounds,
           third: { id: "T", label: "季军赛", players: [], winnerId: "" }
         };
-        saveAndRender();
       }
 
-      function renderKnockout() {
-        if (!state.bracket) {
-          const empty = document.createElement("div");
-          empty.className = "empty-state";
-          empty.textContent = state.groupCount === 2 ? "小组赛结束后点击进入淘汰赛" : "当前分组数不支持淘汰赛";
-          knockoutStage.replaceChildren(empty);
-          return;
+      function knockoutRoundLabel(matchCount) {
+        if (matchCount === 1) {
+          return "决赛";
         }
-        syncFinalMatches();
-        const grid = document.createElement("div");
-        grid.className = "bracket-grid";
-        state.bracket.semis.forEach((match) => grid.append(renderMatch(match, "semi")));
-        grid.append(renderMatch(state.bracket.final, "final"));
-        grid.append(renderMatch(state.bracket.third, "third"));
-
-        const results = renderResults();
-        knockoutStage.replaceChildren(grid, results);
-      }
-
-      function renderMatch(match, kind) {
-        const card = document.createElement("article");
-        card.className = "match-card";
-        const title = document.createElement("div");
-        title.className = "match-title";
-        title.textContent = match.label;
-
-        const versus = document.createElement("div");
-        versus.className = "versus";
-        if (match.players.length < 2) {
-          const empty = document.createElement("div");
-          empty.className = "empty-state";
-          empty.textContent = kind === "semi" ? "等待选手" : "等待半决赛结果";
-          versus.append(empty);
-        } else {
-          match.players.forEach((id) => versus.append(renderVersusPlayer(id)));
+        if (matchCount === 2) {
+          return "半决赛";
         }
-
-        const select = document.createElement("select");
-        select.className = "select-field";
-        select.disabled = match.players.length < 2;
-        appendOption(select, "", "选择胜者");
-        match.players.forEach((id) => appendOption(select, id, getPlayer(id)?.name || "未知玩家"));
-        select.value = match.winnerId || "";
-        select.addEventListener("change", () => {
-          match.winnerId = select.value;
-          syncFinalMatches();
-          saveAndRender();
-        });
-
-        card.append(title, versus, select);
-        return card;
-      }
-
-      function renderVersusPlayer(id) {
-        const player = getPlayer(id);
-        const box = document.createElement("div");
-        box.className = "versus-player";
-        const name = document.createElement("strong");
-        name.textContent = player?.name || "未知玩家";
-        box.append(name, renderRoster(player?.team || [], true));
-        return box;
-      }
-
-      function syncFinalMatches() {
-        if (!state.bracket) {
-          return;
+        if (matchCount === 4) {
+          return "四分之一决赛";
         }
-        const winners = [];
-        const losers = [];
-        state.bracket.semis.forEach((match) => {
-          if (!match.winnerId) {
-            return;
-          }
-          winners.push(match.winnerId);
-          losers.push(match.players.find((id) => id !== match.winnerId));
-        });
-        if (winners.length === 2 && losers.length === 2) {
-          state.bracket.final.players = winners;
-          state.bracket.third.players = losers;
-        } else {
-          state.bracket.final.players = [];
-          state.bracket.third.players = [];
+        if (matchCount === 8) {
+          return "八分之一决赛";
         }
-        if (!state.bracket.final.players.includes(state.bracket.final.winnerId)) {
-          state.bracket.final.winnerId = "";
+        if (matchCount === 16) {
+          return "十六分之一决赛";
         }
-        if (!state.bracket.third.players.includes(state.bracket.third.winnerId)) {
-          state.bracket.third.winnerId = "";
-        }
-      }
-
-      function renderResults() {
-        const wrap = document.createElement("div");
-        wrap.className = "result-grid";
-        const finalWinner = state.bracket.final.winnerId;
-        const finalLoser = state.bracket.final.players.find((id) => id && id !== finalWinner);
-        const thirdWinner = state.bracket.third.winnerId;
-        const fourth = state.bracket.third.players.find((id) => id && id !== thirdWinner);
-        [
-          ["冠军", finalWinner],
-          ["亚军", finalWinner ? finalLoser : ""],
-          ["季军", thirdWinner],
-          ["第四名", thirdWinner ? fourth : ""]
-        ].forEach(([label, id]) => {
-          const card = document.createElement("div");
-          card.className = "result-card";
-          const title = document.createElement("span");
-          title.textContent = label;
-          const value = document.createElement("strong");
-          value.textContent = id ? getPlayer(id)?.name || "未知玩家" : "未决出";
-          card.append(title, value);
-          wrap.append(card);
-        });
-        return wrap;
-      }
-
-      function appendOption(select, value, text) {
-        const option = document.createElement("option");
-        option.value = value;
-        option.textContent = text;
-        select.append(option);
+        return `第 ${matchCount} 轮`;
       }
 
       function createPetNoMap(list) {
@@ -1422,6 +1416,10 @@
         return state.participants.find((participant) => participant.id === id);
       }
 
+      function getEligibleParticipants() {
+        return state.participants.filter((participant) => participant.eligible);
+      }
+
       function shuffle(list) {
         const pool = [...list];
         for (let i = pool.length - 1; i > 0; i -= 1) {
@@ -1465,6 +1463,39 @@
 
       function getGroupNames() {
         return Array.from({ length: state.groupCount }, (_, index) => String.fromCharCode(65 + index));
+      }
+
+      function isPowerOfTwo(value) {
+        return Number.isInteger(value) && value >= MIN_GROUP_COUNT && (value & (value - 1)) === 0;
+      }
+
+      function migrateLegacyBracket(legacyBracket) {
+        if (!Array.isArray(legacyBracket?.semis) || legacyBracket.semis.length !== 2) {
+          return null;
+        }
+        const toMatch = (match, id, label) => ({
+          id,
+          label,
+          players: Array.isArray(match?.players) ? match.players : [],
+          winnerId: match?.winnerId || ""
+        });
+        return {
+          version: 2,
+          groupCount: 2,
+          rounds: [
+            {
+              id: "R1",
+              label: "半决赛",
+              matches: legacyBracket.semis.map((match, index) => toMatch(match, `R1M${index + 1}`, `半决赛 ${index + 1}`))
+            },
+            {
+              id: "R2",
+              label: "决赛",
+              matches: [toMatch(legacyBracket.final, "R2M1", "决赛 1")]
+            }
+          ],
+          third: toMatch(legacyBracket.third, "T", "季军赛")
+        };
       }
 
       function exportConfig() {
